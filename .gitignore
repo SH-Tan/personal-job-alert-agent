@@ -1,0 +1,8 @@
+.vscode/
+.codex
+.env
+*.yaml
+data/
+__pycache__/
+.mypy_cache/
+*.toml

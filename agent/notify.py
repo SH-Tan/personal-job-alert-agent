@@ -15,6 +15,10 @@ def send_email_notification(matches: list[dict]):
     smtp_host = os.getenv("SMTP_HOST", "smtp.gmail.com")
     smtp_port = int(os.getenv("SMTP_PORT", "587"))
 
+    if not sender or not password or not to_addr:
+        print("[WARN] Notification email is not configured; skipping email send.")
+        return
+
     lines = []
     lines.append("New internship matches:\n")
 

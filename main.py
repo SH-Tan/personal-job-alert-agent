@@ -5,13 +5,38 @@ from agent.cv_profile import load_or_build_profiles
 from agent.company_discovery import discover_related_companies
 from agent.sources import collect_jobs
 from agent.matcher import match_job_against_profiles
-from agent.storage import init_db, exists, save_job, make_fingerprint
-from agent.notify import send_email_notification
+from agent.storage import (
+    init_db,
+    load_seen_fingerprints,
+    make_fingerprint,
+    prune_old_jobs,
+    save_job,
+)
 
 
 def load_config(path: str = "config.yaml") -> dict:
-    with open(path, "r") as f:
+    with open(path, "r", encoding="utf-8") as f:
         return yaml.safe_load(f)
+
+
+def _merge_companies(*company_lists: list[dict]) -> list[dict]:
+    merged = []
+    seen = set()
+
+    for company_list in company_lists:
+        for company in company_list:
+            key = (
+                str(company.get("name", "")).strip().lower(),
+                str(company.get("careers_url", "")).strip().lower(),
+            )
+
+            if not key[0] or not key[1] or key in seen:
+                continue
+
+            seen.add(key)
+            merged.append(company)
+
+    return merged
 
 
 def main():
@@ -19,12 +44,19 @@ def main():
 
     config = load_config()
     db_path = "data/jobs.db"
+    storage_cfg = config.get("storage", {})
 
     threshold = int(config.get("matching", {}).get("threshold", 75))
-    notify_top_k = int(config.get("matching", {}).get("notify_top_k", 10))
+    retention_days = int(storage_cfg.get("retention_days", 14))
 
     print("[INFO] Initializing DB...")
     init_db(db_path)
+    deleted_count = prune_old_jobs(db_path, retention_days)
+
+    if deleted_count:
+        print(f"[INFO] Pruned {deleted_count} stored jobs older than {retention_days} days.")
+
+    seen_fingerprints = load_seen_fingerprints(db_path)
 
     print("[INFO] Loading CV profiles...")
     profiles = load_or_build_profiles(config)
@@ -34,18 +66,21 @@ def main():
 
     if discovered:
         print(f"[INFO] Discovered {len(discovered)} possible companies.")
-        config["known_companies"] = config.get("known_companies", []) + discovered
+    config["known_companies"] = _merge_companies(
+        config.get("known_companies", []),
+        discovered,
+    )
 
     print("[INFO] Collecting jobs/posts/alerts...")
     jobs = collect_jobs(config)
     print(f"[INFO] Collected {len(jobs)} raw items.")
-
-    notify_items = []
+    saved_count = 0
+    high_score_count = 0
 
     for job in jobs:
         fp = make_fingerprint(job)
 
-        if exists(db_path, fp):
+        if fp in seen_fingerprints:
             print(f"[SKIP] Already seen: {job.get('title')}")
             continue
 
@@ -56,32 +91,26 @@ def main():
                 job=job,
                 profiles=profiles,
                 search_profiles=config.get("search_profiles", []),
+                config=config,
             )
         except Exception as e:
             print(f"[WARN] Match failed: {e}")
             continue
 
         save_job(db_path, job, match)
+        seen_fingerprints.add(fp)
+        saved_count += 1
 
         score = int(match.get("score", 0))
 
         if score >= threshold:
-            notify_items.append(
-                {
-                    "job": job,
-                    "match": match,
-                }
-            )
+            high_score_count += 1
 
-    notify_items.sort(
-        key=lambda x: int(x["match"].get("score", 0)),
-        reverse=True,
+    print(
+        f"[INFO] Saved {saved_count} new jobs. "
+        f"{high_score_count} matched the threshold >= {threshold}."
     )
-
-    notify_items = notify_items[:notify_top_k]
-
-    print(f"[INFO] Sending {len(notify_items)} notifications...")
-    send_email_notification(notify_items)
+    print("[INFO] Email notifications are disabled; jobs are stored in SQLite only.")
 
 
 if __name__ == "__main__":
