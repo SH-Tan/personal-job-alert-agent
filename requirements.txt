@@ -1,0 +1,10 @@
+openai
+python-dotenv
+pypdf
+pyyaml
+requests
+beautifulsoup4
+lxml
+apscheduler
+playwright
+apscheduler
