@@ -8,10 +8,17 @@ from email.header import decode_header
 from email.message import Message
 from email.utils import parsedate_to_datetime
 from typing import Any, cast
-from urllib.parse import urljoin
+from urllib.parse import urljoin, urlparse
 
 import requests
 from bs4 import BeautifulSoup
+
+try:
+    from playwright.sync_api import TimeoutError as PlaywrightTimeoutError
+    from playwright.sync_api import sync_playwright
+except ImportError:
+    PlaywrightTimeoutError = None
+    sync_playwright = None
 
 
 INTERNSHIP_TERMS = (
@@ -21,6 +28,24 @@ INTERNSHIP_TERMS = (
     "university",
     "campus",
     "co-op",
+)
+
+CAREER_PATH_HINTS = (
+    "/careers",
+    "/jobs",
+    "/students",
+    "/students-and-graduates",
+    "/early-careers",
+    "/campus",
+)
+
+JS_HEAVY_HOST_HINTS = (
+    "workday",
+    "myworkdayjobs",
+    "greenhouse",
+    "lever",
+    "ashby",
+    "smartrecruiters",
 )
 
 
@@ -34,6 +59,11 @@ def normalize_company(company: dict) -> dict:
         "careers_url": clean_text(company.get("careers_url", "")),
         "why_relevant": clean_text(company.get("why_relevant", "")),
     }
+
+
+def _is_js_heavy_url(url: str) -> bool:
+    lowered = (url or "").lower()
+    return any(hint in lowered for hint in JS_HEAVY_HOST_HINTS)
 
 
 def _is_job_like_text(text: str) -> bool:
@@ -109,16 +139,20 @@ def fetch_company_page(company: dict) -> list[dict]:
         return []
 
     headers = {"User-Agent": "Mozilla/5.0 personal-job-alert-agent/1.0"}
+    use_js_fallback = bool(company.get("use_js_fallback", True))
 
     try:
-        resp = requests.get(url, headers=headers, timeout=20)
-        resp.raise_for_status()
+        base_url, html = _fetch_company_html(
+            url=url,
+            headers=headers,
+            use_js_fallback=use_js_fallback,
+        )
     except Exception as e:
         print(f"[WARN] Could not fetch {name}: {e}")
         return []
 
-    soup = BeautifulSoup(resp.text, "lxml")
-    jobs = _extract_job_cards(soup, url, name)
+    soup = BeautifulSoup(html, "lxml")
+    jobs = _extract_job_cards(soup, base_url, name)
 
     if jobs:
         return jobs[:10]
@@ -133,10 +167,155 @@ def fetch_company_page(company: dict) -> list[dict]:
             "source": "company_website",
             "company": name,
             "title": f"Possible internship at {name}",
-            "url": url,
+            "url": base_url,
             "description": page_text[:4000],
         }
     ]
+
+
+def _fetch_company_html(
+    url: str,
+    headers: dict[str, str],
+    use_js_fallback: bool = True,
+) -> tuple[str, str]:
+    last_url = url
+    last_html = ""
+
+    try:
+        response = _fetch_company_response(url, headers)
+        last_url = response.url
+        last_html = response.text
+
+        if _looks_like_blocked_or_empty_jobs_page(last_html, response.url) and use_js_fallback:
+            raise ValueError("Page appears to require JavaScript rendering.")
+
+        return response.url, response.text
+    except Exception as http_error:
+        if not use_js_fallback:
+            raise http_error
+
+        if not _should_try_js_fallback(url, last_html):
+            raise http_error
+
+        js_url, js_html = _fetch_company_page_with_browser(url)
+
+        if not js_html.strip():
+            raise http_error
+
+        return js_url, js_html
+
+
+def _fetch_company_response(url: str, headers: dict[str, str]) -> requests.Response:
+    candidates = [url]
+    parsed = urlparse(url)
+
+    if parsed.scheme and parsed.netloc:
+        origin = f"{parsed.scheme}://{parsed.netloc}"
+        candidates.extend(origin + path for path in CAREER_PATH_HINTS)
+
+    seen = set()
+    last_error: Exception | None = None
+
+    for candidate in candidates:
+        normalized = candidate.rstrip("/")
+        if not normalized or normalized in seen:
+            continue
+
+        seen.add(normalized)
+
+        try:
+            response = requests.get(
+                candidate,
+                headers=headers,
+                timeout=20,
+                allow_redirects=True,
+            )
+            response.raise_for_status()
+        except Exception as e:
+            last_error = e
+            continue
+
+        return response
+
+    if last_error:
+        raise last_error
+
+    raise ValueError(f"No readable URL candidate found for {url}")
+
+
+def _looks_like_blocked_or_empty_jobs_page(html: str, url: str) -> bool:
+    lowered = clean_text(html).lower()
+
+    if not lowered:
+        return True
+
+    if _is_js_heavy_url(url):
+        js_markers = (
+            "enable javascript",
+            "javascript is required",
+            "please enable javascript",
+            "applicant accommodation",
+            "greenhouse.io",
+            "lever.co",
+            "myworkdayjobs.com",
+            "__next",
+            "window.__initial_state__",
+        )
+        if any(marker in lowered for marker in js_markers):
+            return True
+
+    if any(term in lowered for term in INTERNSHIP_TERMS):
+        return False
+
+    generic_markers = (
+        "job search",
+        "career opportunities",
+        "student programs",
+        "open positions",
+    )
+    return not any(marker in lowered for marker in generic_markers)
+
+
+def _should_try_js_fallback(url: str, html: str) -> bool:
+    return _is_js_heavy_url(url) or _looks_like_blocked_or_empty_jobs_page(html, url)
+
+
+def _fetch_company_page_with_browser(url: str) -> tuple[str, str]:
+    if sync_playwright is None:
+        raise RuntimeError(
+            "Playwright is not installed. Install dependencies and run "
+            "`playwright install chromium` to enable JavaScript-heavy career site scraping."
+        )
+
+    with sync_playwright() as playwright:
+        browser = playwright.chromium.launch(headless=True)
+        page = browser.new_page(
+            user_agent="Mozilla/5.0 personal-job-alert-agent/1.0",
+        )
+
+        try:
+            page.goto(url, wait_until="domcontentloaded", timeout=30000)
+
+            try:
+                page.wait_for_load_state("networkidle", timeout=5000)
+            except Exception:
+                pass
+
+            try:
+                if PlaywrightTimeoutError is not None:
+                    page.wait_for_selector(
+                        "a, div, li, section, article",
+                        timeout=5000,
+                    )
+            except Exception:
+                pass
+
+            html = page.content()
+            current_url = page.url
+        finally:
+            browser.close()
+
+    return current_url, html
 
 
 def fetch_known_company_jobs(config: dict) -> list[dict]:
@@ -224,6 +403,7 @@ def fetch_job_alert_emails(config: dict) -> list[dict]:
     password = os.getenv("EMAIL_APP_PASSWORD")
     imap_host = os.getenv("IMAP_HOST", "imap.gmail.com")
     imap_port = int(os.getenv("IMAP_PORT", "993"))
+    imap_folder = os.getenv("IMAP_FOLDER", email_cfg.get("imap_folder", "INBOX"))
 
     if not address or not password:
         print("[WARN] Email credentials are missing; skipping inbox job alerts.")
@@ -240,7 +420,7 @@ def fetch_job_alert_emails(config: dict) -> list[dict]:
     try:
         mail = imaplib.IMAP4_SSL(imap_host, imap_port)
         mail.login(address, password)
-        mail.select("inbox")
+        mail.select(imap_folder)
     except Exception as e:
         print(f"[WARN] Email connection failed: {e}")
         return []

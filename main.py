@@ -2,7 +2,7 @@ import yaml
 from dotenv import load_dotenv
 
 from agent.cv_profile import load_or_build_profiles
-from agent.company_discovery import discover_related_companies
+from agent.company_discovery import discover_related_companies, save_company_registry
 from agent.sources import collect_jobs
 from agent.matcher import match_job_against_profiles
 from agent.storage import (
@@ -69,6 +69,10 @@ def main():
     config["known_companies"] = _merge_companies(
         config.get("known_companies", []),
         discovered,
+    )
+    save_company_registry(
+        config.get("company_discovery", {}).get("all_companies_path", "data/all_companies.json"),
+        config["known_companies"],
     )
 
     print("[INFO] Collecting jobs/posts/alerts...")

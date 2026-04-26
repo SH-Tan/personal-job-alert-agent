@@ -8,17 +8,21 @@ Install dependencies:
 
 ```bash
 pip install -r requirements.txt
+playwright install chromium
 ```
+
+`playwright install chromium` is needed for JavaScript-heavy career sites such as Workday, Greenhouse, and Lever. If you skip it, the agent will still scan normal HTML pages and log a warning when a browser-rendered site cannot be scraped.
 
 Create `.env`:
 
 ```bash
 GEMINI_API_KEY=your_gemini_key
 
-EMAIL_ADDRESS=your_email@gmail.com
-EMAIL_APP_PASSWORD=your_gmail_app_password
-IMAP_HOST=imap.gmail.com
+EMAIL_ADDRESS=your_email@outlook.com
+EMAIL_APP_PASSWORD=your_outlook_app_password
+IMAP_HOST=outlook.office365.com
 IMAP_PORT=993
+IMAP_FOLDER=INBOX
 ```
 
 Run one scan:
@@ -79,7 +83,20 @@ search_profiles:
 company_discovery:
   enabled: true
   cache_path: data/discovered_companies.json
+  all_companies_path: data/all_companies.json
   refresh_cache: false
+  focus_areas:
+    - machine learning
+    - AI research
+    - robotics
+    - autonomous vehicles
+    - finance technology
+    - quantitative trading
+    - quantitative research
+  company_size_preference:
+    - small startups
+    - mid-size companies
+    - select larger companies
   seed_keywords:
     - machine learning internship
     - AI research internship
@@ -93,6 +110,7 @@ known_companies:
 email_sources:
   enabled: true
   max_recent_emails: 80
+  imap_folder: INBOX
   sender_keywords:
     - linkedin
     - handshake
@@ -116,6 +134,8 @@ storage:
 
 - CV extraction is cached in `data/profiles.json`.
 - Company discovery is cached in `data/discovered_companies.json`.
+- All merged companies are written to `data/all_companies.json`, even if no job is found for them yet.
+- Set `company_discovery.refresh_cache: true` for one run if you want to rebuild discovered companies after changing focus areas or seed keywords.
 - Matching uses local scoring first and only calls Gemini for uncertain jobs.
 - Set `llm.use_for_matching: false` for the cheapest matching mode.
 
@@ -128,3 +148,17 @@ Jobs are saved in `data/jobs.db`. Rows older than `storage.retention_days` are p
 ## Privacy
 
 `.env`, `config.yaml`, and `data/` are ignored by git. If secrets were ever committed or pushed, rotate those keys because removing files later does not remove them from git history.
+
+## Outlook Notes
+
+If you use Outlook/Hotmail/Live instead of Gmail, use:
+
+```bash
+EMAIL_ADDRESS=your_email@outlook.com
+EMAIL_APP_PASSWORD=your_outlook_app_password
+IMAP_HOST=outlook.office365.com
+IMAP_PORT=993
+IMAP_FOLDER=INBOX
+```
+
+If Microsoft account two-step verification is enabled, create an app password and use that for `EMAIL_APP_PASSWORD`. If Outlook moves alerts into a custom folder, set `IMAP_FOLDER` to that folder name instead of `INBOX`.
