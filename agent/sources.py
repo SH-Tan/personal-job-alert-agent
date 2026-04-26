@@ -49,6 +49,10 @@ JS_HEAVY_HOST_HINTS = (
 )
 
 
+def _xoauth2_auth_string(address: str, access_token: str) -> bytes:
+    return f"user={address}\x01auth=Bearer {access_token}\x01\x01".encode("utf-8")
+
+
 def clean_text(text: str) -> str:
     return re.sub(r"\s+", " ", text or "").strip()
 
@@ -399,13 +403,29 @@ def fetch_job_alert_emails(config: dict) -> list[dict]:
     if not email_cfg.get("enabled", True):
         return []
 
+    # Default setup is Gmail IMAP with an app password; OAuth remains available
+    # for providers like Outlook that no longer accept plain IMAP LOGIN.
     address = os.getenv("EMAIL_ADDRESS")
+    auth_mode = os.getenv("IMAP_AUTH", "password").strip().lower()
     password = os.getenv("EMAIL_APP_PASSWORD")
+    access_token = (
+        os.getenv("EMAIL_ACCESS_TOKEN")
+        or os.getenv("IMAP_ACCESS_TOKEN")
+        or password
+    )
     imap_host = os.getenv("IMAP_HOST", "imap.gmail.com")
     imap_port = int(os.getenv("IMAP_PORT", "993"))
     imap_folder = os.getenv("IMAP_FOLDER", email_cfg.get("imap_folder", "INBOX"))
 
-    if not address or not password:
+    if not address:
+        print("[WARN] Email address is missing; skipping inbox job alerts.")
+        return []
+
+    if auth_mode == "oauth2" and not access_token:
+        print("[WARN] Email access token is missing; skipping inbox job alerts.")
+        return []
+
+    if auth_mode != "oauth2" and not password:
         print("[WARN] Email credentials are missing; skipping inbox job alerts.")
         return []
 
@@ -419,7 +439,11 @@ def fetch_job_alert_emails(config: dict) -> list[dict]:
 
     try:
         mail = imaplib.IMAP4_SSL(imap_host, imap_port)
-        mail.login(address, password)
+        if auth_mode == "oauth2":
+            auth_string = _xoauth2_auth_string(address, access_token)
+            mail.authenticate("XOAUTH2", lambda _: auth_string)
+        else:
+            mail.login(address, password)
         mail.select(imap_folder)
     except Exception as e:
         print(f"[WARN] Email connection failed: {e}")
